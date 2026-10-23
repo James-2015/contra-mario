@@ -1,0 +1,1054 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>魂斗罗 · 全砖块世界</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #111;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            touch-action: none;
+        }
+        .game-wrapper {
+            background: #1a1a2e;
+            padding: 20px;
+            border-radius: 24px;
+            box-shadow: 0 12px 28px rgba(0,0,0,0.8);
+        }
+        canvas {
+            display: block;
+            width: 800px;
+            height: 600px;
+            border-radius: 16px;
+            background: #87ceeb;
+            box-shadow: inset 0 0 0 2px #4a6fa5;
+            cursor: none;
+        }
+        .controls {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 16px;
+            color: #ccd;
+            font-size: 14px;
+            font-weight: 500;
+            background: #16213e;
+            padding: 10px 20px;
+            border-radius: 40px;
+            box-shadow: inset 0 2px 6px rgba(0,0,0,0.6);
+            flex-wrap: wrap;
+            gap: 6px 14px;
+        }
+        .controls kbd {
+            background: #2a3a5e;
+            padding: 2px 10px;
+            border-radius: 30px;
+            color: #f0e68c;
+            font-weight: 700;
+            border: 1px solid #4a6fa5;
+        }
+        .controls span { color: #aac; }
+        @media (max-width: 820px) {
+            canvas { width: 100%; height: auto; aspect-ratio: 800/600; }
+            .game-wrapper { padding: 10px; width: 98vw; }
+            .controls { font-size: 12px; justify-content: center; }
+        }
+    </style>
+</head>
+<body>
+<div class="game-wrapper">
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    <div class="controls">
+        <span><kbd>← →</kbd> 移动 &nbsp; <kbd>↑</kbd> 跳跃/瞄准 &nbsp; <kbd>↓</kbd> 趴下</span>
+        <span><kbd>J</kbd> 射击 &nbsp; <kbd>N</kbd> 下一关 &nbsp; <kbd>R</kbd> 重新开始</span>
+        <span>💥 踩敌人 &nbsp; 🏆 第 <span id="levelDisplay">1</span>/8 关</span>
+    </div>
+</div>
+<script>
+    // ------------------------------------------------------------
+    // 魂斗罗 vs 蘑菇乌龟 · 全砖块世界 (平台与地面均为砖块)
+    // 按R键重新开始游戏（GAME OVER或通关后均可）
+    // ------------------------------------------------------------
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const levelDisplay = document.getElementById('levelDisplay');
+
+    const SCREEN_W = 800, SCREEN_H = 600;
+    const WORLD_W = 10000;
+
+    // ---- 音频管理器 ----
+    class AudioManager {
+        constructor() {
+            this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+            this.sounds = {};
+            this.soundEnabled = true;
+            this.soundBuffers = {};
+            this.loadSound('jump', 220, 0.2, 'sine', 0.3);
+            this.loadSound('shoot', 800, 0.08, 'square', 0.2);
+            this.loadSound('hit', 300, 0.15, 'sawtooth', 0.25);
+            this.loadSound('powerup', 600, 0.25, 'sine', 0.3);
+            this.loadSound('explode', 120, 0.4, 'sawtooth', 0.4);
+            this.loadSound('downgrade', 250, 0.3, 'square', 0.2);
+            this.loadSound('1up', 880, 0.3, 'sine', 0.25);
+            this.loadSound('break', 200, 0.1, 'square', 0.15);
+            this.loadSound('laser', 1400, 0.5, 'sawtooth', 0.15);
+            this.loadSound('stomp', 100, 0.12, 'square', 0.25);
+            this.loadSound('fall', 150, 0.3, 'sawtooth', 0.2);
+            this.loadSound('fire', 400, 0.15, 'sawtooth', 0.15);
+            this.loadSound('missile', 300, 0.2, 'sawtooth', 0.2);
+            this.loadSound('explode2', 80, 0.4, 'sawtooth', 0.35);
+        }
+        loadSound(name, freq, dur, type, vol) {
+            try {
+                const buffer = this.ctx.createBuffer(1, this.ctx.sampleRate * dur, this.ctx.sampleRate);
+                const data = buffer.getChannelData(0);
+                for (let i = 0; i < data.length; i++) {
+                    const t = i / this.ctx.sampleRate;
+                    let env = Math.exp(-t * 6);
+                    if (type === 'sine') data[i] = Math.sin(2 * Math.PI * freq * t) * env;
+                    else if (type === 'square') data[i] = (Math.sin(2 * Math.PI * freq * t) > 0 ? 1 : -1) * env;
+                    else if (type === 'sawtooth') data[i] = (t * freq % 1) * 2 - 1 * env;
+                }
+                this.soundBuffers[name] = buffer;
+                this.sounds[name] = { buffer, vol: vol || 0.3 };
+            } catch(e) { console.warn('音效合成失败', name); }
+        }
+        playSound(name) {
+            if (!this.soundEnabled || !this.sounds[name]) return;
+            try {
+                const src = this.ctx.createBufferSource();
+                src.buffer = this.soundBuffers[name];
+                const gain = this.ctx.createGain();
+                gain.gain.value = this.sounds[name].vol || 0.3;
+                src.connect(gain);
+                gain.connect(this.ctx.destination);
+                src.start();
+            } catch(e) {}
+        }
+        playVictory() {
+            if (!this.soundEnabled) return;
+            const notes = [523, 587, 659, 784, 880, 784, 659, 587, 523, 659, 784, 880];
+            let time = 0;
+            for (const note of notes) {
+                setTimeout(() => {
+                    try {
+                        const src = this.ctx.createBufferSource();
+                        const buffer = this.ctx.createBuffer(1, this.ctx.sampleRate * 0.15, this.ctx.sampleRate);
+                        const data = buffer.getChannelData(0);
+                        for (let i = 0; i < data.length; i++) {
+                            const t = i / this.ctx.sampleRate;
+                            data[i] = Math.sin(2 * Math.PI * note * t) * Math.exp(-t * 8);
+                        }
+                        src.buffer = buffer;
+                        const gain = this.ctx.createGain();
+                        gain.gain.value = 0.2;
+                        src.connect(gain);
+                        gain.connect(this.ctx.destination);
+                        src.start();
+                    } catch(e) {}
+                }, time);
+                time += 100;
+            }
+        }
+    }
+    const audio = new AudioManager();
+
+    // ---- 烟花粒子系统 ----
+    class FireworkParticle {
+        constructor(x, y, color, isGolden = false) {
+            this.x = x; this.y = y;
+            this.color = color;
+            const angle = Math.random() * Math.PI * 2;
+            const speed = 2 + Math.random() * 7;
+            this.vx = Math.cos(angle) * speed;
+            this.vy = Math.sin(angle) * speed - 1;
+            this.life = 1.0;
+            this.decay = 0.003 + Math.random() * 0.015;
+            this.size = 3 + Math.random() * 5;
+            this.trail = [];
+            this.isGolden = isGolden;
+            this.glowSize = this.size * 2;
+        }
+        update() {
+            this.trail.push({ x: this.x, y: this.y });
+            if (this.trail.length > 8) this.trail.shift();
+            this.x += this.vx;
+            this.y += this.vy;
+            this.vy += 0.04;
+            this.vx *= 0.99;
+            this.vy *= 0.99;
+            this.life -= this.decay;
+            this.size *= 0.998;
+            this.glowSize = this.size * 1.5;
+        }
+        draw(ctx) {
+            if (this.life <= 0) return;
+            const alpha = this.life;
+            const grad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.glowSize);
+            grad.addColorStop(0, this.color.replace('1)', (alpha * 0.3) + ')'));
+            grad.addColorStop(1, 'rgba(255,255,255,0)');
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.glowSize, 0, Math.PI * 2);
+            ctx.fill();
+            for (let i = 0; i < this.trail.length; i++) {
+                const t = this.trail[i];
+                const a = (i / this.trail.length) * alpha * 0.5;
+                const s = this.size * (0.3 + (i / this.trail.length) * 0.7);
+                ctx.fillStyle = this.color.replace('1)', a + ')');
+                ctx.beginPath();
+                ctx.arc(t.x, t.y, s, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.globalAlpha = alpha;
+            ctx.shadowColor = this.isGolden ? '#ffd700' : this.color;
+            ctx.shadowBlur = this.isGolden ? 30 : 20;
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+            ctx.fill();
+            if (this.isGolden) {
+                ctx.shadowBlur = 50;
+                ctx.fillStyle = 'rgba(255,255,200,0.2)';
+                ctx.beginPath();
+                ctx.arc(this.x - this.size*0.3, this.y - this.size*0.3, this.size*0.4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.shadowBlur = 0;
+            ctx.globalAlpha = 1;
+        }
+        isDead() { return this.life <= 0 || this.size < 0.3; }
+    }
+
+    class Firework {
+        constructor(x, y, isGolden = false) {
+            this.x = x || (50 + Math.random() * (SCREEN_W - 100));
+            this.y = y || (50 + Math.random() * (SCREEN_H * 0.6));
+            this.particles = [];
+            this.isGolden = isGolden;
+            const colors = isGolden ? [
+                'rgba(255, 215, 0, 1)', 'rgba(255, 200, 100, 1)',
+                'rgba(255, 180, 50, 1)', 'rgba(255, 235, 150, 1)'
+            ] : [
+                'rgba(255, 50, 50, 1)', 'rgba(255, 200, 50, 1)',
+                'rgba(50, 200, 255, 1)', 'rgba(255, 50, 200, 1)',
+                'rgba(50, 255, 100, 1)', 'rgba(255, 150, 50, 1)',
+                'rgba(200, 50, 255, 1)', 'rgba(255, 255, 100, 1)'
+            ];
+            const color = colors[Math.floor(Math.random() * colors.length)];
+            const count = isGolden ? 60 + Math.floor(Math.random() * 40) : 40 + Math.floor(Math.random() * 40);
+            for (let i = 0; i < count; i++) {
+                this.particles.push(new FireworkParticle(this.x, this.y, color, isGolden));
+            }
+            this.alive = true;
+            this.life = 1.0;
+        }
+        update() {
+            this.life -= 0.005;
+            let allDead = true;
+            for (const p of this.particles) { p.update(); if (!p.isDead()) allDead = false; }
+            if (allDead || this.life <= 0) this.alive = false;
+        }
+        draw(ctx) { for (const p of this.particles) p.draw(ctx); }
+        isDead() { return !this.alive; }
+    }
+
+    // ---- 日落背景 ----
+    function drawSunset(ctx, time) {
+        const grad = ctx.createLinearGradient(0, 0, 0, SCREEN_H);
+        const t = Math.sin(time * 0.3) * 0.1 + 0.5;
+        grad.addColorStop(0, `rgb(${20 + 30 * t}, ${10 + 40 * t}, ${80 + 60 * t})`);
+        grad.addColorStop(0.3, `rgb(${180 + 50 * t}, ${60 + 40 * t}, ${30 + 30 * t})`);
+        grad.addColorStop(0.5, `rgb(${230 + 20 * t}, ${100 + 30 * t}, ${40 + 20 * t})`);
+        grad.addColorStop(0.7, `rgb(${200 + 30 * t}, ${130 + 20 * t}, ${50 + 20 * t})`);
+        grad.addColorStop(1, `rgb(${80 + 20 * t}, ${40 + 20 * t}, ${20 + 10 * t})`);
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
+        const sunX = SCREEN_W * 0.7;
+        const sunY = SCREEN_H * 0.25 + Math.sin(time * 0.2) * 20;
+        const sunR = 60 + Math.sin(time * 0.5) * 5;
+        for (let i = 0; i < 3; i++) {
+            const r = sunR + i * 40 + Math.sin(time * 0.3 + i) * 10;
+            const grad2 = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, r);
+            grad2.addColorStop(0, `rgba(255, 200, 100, ${0.3 - i * 0.08})`);
+            grad2.addColorStop(1, 'rgba(255, 200, 100, 0)');
+            ctx.fillStyle = grad2;
+            ctx.beginPath();
+            ctx.arc(sunX, sunY, r, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        const grad3 = ctx.createRadialGradient(sunX - 20, sunY - 20, 0, sunX, sunY, sunR);
+        grad3.addColorStop(0, '#fff8e0');
+        grad3.addColorStop(0.3, '#ffdd44');
+        grad3.addColorStop(0.7, '#ff8800');
+        grad3.addColorStop(1, 'rgba(255, 80, 0, 0.8)');
+        ctx.fillStyle = grad3;
+        ctx.beginPath();
+        ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(20, 10, 5, 0.6)';
+        ctx.beginPath();
+        ctx.moveTo(0, SCREEN_H * 0.75);
+        for (let i = 0; i <= SCREEN_W; i += 10) {
+            const h = Math.sin(i * 0.008 + 1) * 40 + Math.sin(i * 0.015 + 3) * 25 + Math.sin(i * 0.005 + 5) * 50;
+            ctx.lineTo(i, SCREEN_H * 0.7 - h);
+        }
+        ctx.lineTo(SCREEN_W, SCREEN_H);
+        ctx.lineTo(0, SCREEN_H);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = 'rgba(10, 5, 3, 0.8)';
+        ctx.fillRect(0, SCREEN_H * 0.88, SCREEN_W, SCREEN_H * 0.12);
+        for (let i = 0; i < SCREEN_W; i += 8) {
+            const h = 5 + Math.sin(i * 0.1 + time * 0.5) * 3 + Math.sin(i * 0.05 + time * 0.3) * 4;
+            ctx.fillStyle = 'rgba(5, 3, 2, 0.5)';
+            ctx.fillRect(i, SCREEN_H * 0.88 - h, 2, h);
+        }
+        for (let i = 0; i < 30; i++) {
+            const sx = (i * 137 + 50) % SCREEN_W;
+            const sy = (i * 97 + 20) % (SCREEN_H * 0.4);
+            const brightness = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(i * 2.3 + time * 0.5));
+            ctx.fillStyle = `rgba(255, 255, 255, ${brightness * 0.4})`;
+            ctx.beginPath();
+            ctx.arc(sx, sy, 1 + brightness * 0.5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    // ---- 辅助 ----
+    function rectIntersect(a, b) {
+        return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+
+    // ---- 导弹发射器 ----
+    class MissileLauncher {
+        constructor(x, y, direction = 1) {
+            this.x = x; this.y = y; this.direction = direction;
+            this.w = 30; this.h = 20; this.active = true; this.timer = 0;
+            this.fireInterval = 2.0 + Math.random() * 1.5; this.color = '#666';
+            this.missiles = []; this.hp = 15; this.maxHp = 15; this.hitFlash = 0;
+        }
+        getRect() { return { x: this.x, y: this.y, w: this.w, h: this.h }; }
+        update(dt, playerX, playerY, cameraX) {
+            if (!this.active) return;
+            const onScreen = this.x + this.w > cameraX && this.x < cameraX + SCREEN_W;
+            if (onScreen) {
+                this.timer += dt;
+                if (this.timer > this.fireInterval) {
+                    this.timer = 0; this.fireInterval = 1.5 + Math.random() * 1.5;
+                    const mx = this.direction === 1 ? this.x + this.w : this.x;
+                    const my = this.y + this.h/2 - 8;
+                    this.missiles.push(new Missile(mx, my, this.direction, playerX, playerY));
+                    audio.playSound('missile');
+                }
+            }
+            if (this.hitFlash > 0) this.hitFlash -= dt;
+            for (const m of this.missiles) m.update(dt);
+            this.missiles = this.missiles.filter(m => m.active);
+        }
+        takeDamage(dmg, audio) {
+            this.hp -= dmg; this.hitFlash = 0.15; audio.playSound('hit');
+            if (this.hp <= 0) {
+                this.active = false; audio.playSound('explode2');
+                for (let i = 0; i < 30; i++) {
+                    const fw = new Firework(this.x + Math.random()*30, this.y + Math.random()*20, Math.random() < 0.3);
+                    window._fireworks.push(fw);
+                }
+            }
+        }
+        draw(ctx, cameraX) {
+            if (!this.active) return;
+            const sx = this.x - cameraX, sy = this.y;
+            if (this.hitFlash > 0) { ctx.shadowColor = '#ff0000'; ctx.shadowBlur = 20; }
+            ctx.fillStyle = '#555'; ctx.fillRect(sx, sy + 4, this.w, this.h - 8);
+            ctx.fillStyle = this.color; ctx.fillRect(sx + (this.direction === 1 ? this.w - 6 : 0), sy, 6, this.h);
+            ctx.fillRect(sx + 2, sy + 2, this.w - 4, 4); ctx.shadowBlur = 0;
+            const onScreen = this.x + this.w > cameraX && this.x < cameraX + SCREEN_W;
+            ctx.fillStyle = onScreen ? (this.timer > this.fireInterval * 0.7 ? '#ff2200' : '#00ff00') : '#444';
+            ctx.beginPath(); ctx.arc(sx + this.w/2, sy + 4, 3, 0, Math.PI * 2); ctx.fill();
+            const hpPct = this.hp / this.maxHp;
+            ctx.fillStyle = '#333'; ctx.fillRect(sx, sy - 8, this.w, 4);
+            ctx.fillStyle = hpPct > 0.5 ? '#0f0' : '#f00'; ctx.fillRect(sx, sy - 8, this.w * hpPct, 4);
+            if (!onScreen) {
+                ctx.fillStyle = 'rgba(255,255,0,0.3)'; ctx.font = '10px sans-serif';
+                ctx.fillText('⏸', sx + 10, sy + 14);
+            }
+            for (const m of this.missiles) m.draw(ctx, cameraX);
+        }
+        getMissiles() { return this.missiles; }
+    }
+
+    // ---- 导弹 ----
+    class Missile {
+        constructor(x, y, direction, targetX, targetY) {
+            this.x = x; this.y = y; this.direction = direction;
+            this.w = 12; this.h = 8; this.speed = 3.5 + Math.random() * 1.5;
+            this.active = true; this.vy = 0; this.targetX = targetX; this.targetY = targetY;
+            this.trail = []; this.life = 1.0;
+            const dx = targetX - x, dy = targetY - y - 50, dist = Math.hypot(dx, dy);
+            if (dist > 0) {
+                this.vx = (dx / dist) * this.speed * 0.3 + this.speed * direction * 0.7;
+                this.vy = (dy / dist) * this.speed * 0.3;
+            } else { this.vx = this.speed * direction; this.vy = 0; }
+        }
+        getRect() { return { x: this.x, y: this.y, w: this.w, h: this.h }; }
+        update(dt) {
+            if (!this.active) return;
+            this.trail.push({ x: this.x, y: this.y });
+            if (this.trail.length > 10) this.trail.shift();
+            const dx = this.targetX - this.x, dy = this.targetY - 50 - this.y, dist = Math.hypot(dx, dy);
+            if (dist > 0) { this.vx += (dx / dist) * this.speed * 0.05; this.vy += (dy / dist) * this.speed * 0.05; }
+            const spd = Math.hypot(this.vx, this.vy);
+            if (spd > this.speed * 1.8) { this.vx = (this.vx / spd) * this.speed * 1.8; this.vy = (this.vy / spd) * this.speed * 1.8; }
+            this.x += this.vx * dt * 60; this.y += this.vy * dt * 60; this.life -= dt * 0.1;
+            if (this.x < -50 || this.x > WORLD_W + 50 || this.y < -50 || this.y > SCREEN_H + 50 || this.life <= 0) this.active = false;
+        }
+        draw(ctx, cameraX) {
+            if (!this.active) return;
+            const sx = this.x - cameraX, sy = this.y;
+            for (let i = 0; i < this.trail.length; i++) {
+                const t = this.trail[i], alpha = i / this.trail.length * 0.4, size = 2 + (i / this.trail.length) * 3;
+                ctx.fillStyle = `rgba(255, 150, 50, ${alpha})`;
+                ctx.beginPath(); ctx.arc(t.x - cameraX, t.y, size, 0, Math.PI * 2); ctx.fill();
+            }
+            ctx.shadowColor = '#ff4400'; ctx.shadowBlur = 15;
+            ctx.fillStyle = '#ff6633'; ctx.fillRect(sx, sy, this.w, this.h);
+            ctx.fillStyle = '#ff2200';
+            const tipX = this.direction === 1 ? sx + this.w : sx - 4;
+            ctx.beginPath(); ctx.moveTo(tipX, sy + this.h/2);
+            ctx.lineTo(tipX + this.direction * 4, sy + 2); ctx.lineTo(tipX + this.direction * 4, sy + this.h - 2);
+            ctx.closePath(); ctx.fill();
+            ctx.fillStyle = 'rgba(255, 200, 50, 0.6)';
+            const flameX = this.direction === 1 ? sx - 4 : sx + this.w;
+            ctx.beginPath(); ctx.moveTo(flameX, sy + 2);
+            ctx.lineTo(flameX - this.direction * 8, sy + this.h/2);
+            ctx.lineTo(flameX, sy + this.h - 2);
+            ctx.closePath(); ctx.fill();
+            ctx.shadowBlur = 0;
+        }
+        isDead() { return !this.active; }
+    }
+
+    // ---- 🧱 平台(全砖块化) ----
+    class Platform {
+        constructor(x, y, w, h, ground = false, breakable = false, color = null) {
+            this.x = x; this.y = y; this.w = w; this.h = h;
+            this.ground = ground; this.breakable = false; this.active = true;
+            this.color = color || (ground ? '#64c864' : '#b4641e');
+        }
+        getRect() { return { x: this.x, y: this.y, w: this.w, h: this.h }; }
+        
+        // 🎨 统一高对比度砖块
+        drawCommonBrick(ctx, cameraX, levelTheme) {
+            const sx = this.x - cameraX; 
+            const sy = this.y;
+            const brickW = 28, brickH = 28;
+            
+            // 根据关卡主题决定砖块的填充色
+            let fillColor = '#b0b0b0'; // 默认银灰 (4, 8关岩浆)
+            if ([1, 5].includes(levelTheme)) fillColor = '#c47a4a'; // 褐色 (地面)
+            else if (levelTheme === 2) fillColor = '#5a7a7a';      // 深青色 (地下)
+            else if ([3, 7].includes(levelTheme)) fillColor = '#7a9ac4'; // 蓝灰色 (天空)
+            else if (levelTheme === 6) fillColor = '#4a7a5a';      // 暗绿色 (水下)
+            
+            for (let xOff = 0; xOff < this.w; xOff += brickW) {
+                for (let yOff = 0; yOff < this.h; yOff += brickH) {
+                    const px = sx + xOff, py = sy + yOff;
+                    
+                    // 纯白高光边框
+                    ctx.fillStyle = '#fcfcfc';
+                    ctx.fillRect(px, py, brickW, 3); 
+                    ctx.fillRect(px, py, 3, brickH); 
+                    
+                    // 深色底部阴影
+                    ctx.fillStyle = '#222';
+                    ctx.fillRect(px, py + brickH - 3, brickW, 3); 
+                    ctx.fillRect(px + brickW - 3, py, 3, brickH); 
+
+                    // 中间主题色填充
+                    ctx.fillStyle = fillColor;
+                    ctx.fillRect(px + 3, py + 3, brickW - 6, brickH - 6);
+                    
+                    // 中间偏上的亮部 (金属质感)
+                    ctx.fillStyle = '#f0f0f0';
+                    ctx.globalAlpha = 0.3;
+                    ctx.fillRect(px + 5, py + 5, brickW - 10, (brickH - 10) / 4);
+                    ctx.globalAlpha = 1;
+                }
+            }
+        }
+    }
+
+    // ---- 火块 ----
+    class FireBlock {
+        constructor(x, y, w, h, moveType = 'vertical', speed = 60, range = 80) {
+            this.x = x; this.y = y; this.w = w; this.h = h;
+            this.startX = x; this.startY = y; this.moveType = moveType;
+            this.speed = speed; this.range = range; this.active = true; this.timer = 0;
+            this.color = '#ff4422';
+        }
+        getRect() { return { x: this.x, y: this.y, w: this.w, h: this.h }; }
+        update(dt) {
+            if (!this.active) return;
+            this.timer += dt;
+            const offset = Math.sin(this.timer * this.speed) * this.range;
+            if (this.moveType === 'vertical') this.y = this.startY + offset;
+            else this.x = this.startX + offset;
+        }
+        draw(ctx, cameraX) {
+            if (!this.active) return;
+            const sx = this.x - cameraX, sy = this.y;
+            const grad = ctx.createRadialGradient(sx + this.w/2, sy + this.h/2, 0, sx + this.w/2, sy + this.h/2, this.w);
+            grad.addColorStop(0, 'rgba(255, 200, 50, 0.4)'); grad.addColorStop(1, 'rgba(255, 68, 34, 0)');
+            ctx.fillStyle = grad; ctx.fillRect(sx - this.w, sy - this.h, this.w * 3, this.h * 3);
+            ctx.fillStyle = this.color; ctx.shadowColor = '#ff4400'; ctx.shadowBlur = 20;
+            ctx.fillRect(sx, sy, this.w, this.h); ctx.shadowBlur = 0;
+            ctx.fillStyle = 'rgba(255, 255, 200, 0.3)'; ctx.fillRect(sx + 4, sy + 4, this.w - 8, this.h - 8);
+        }
+    }
+
+    // ---- 敌人(蘑菇怪和乌龟) ----
+    class Enemy {
+        constructor(x, y, type = 'GOOMBA', speedMul = 1.0) {
+            this.x = x; this.y = y; 
+            this.type = type;
+            this.w = type === 'KOOPA' ? 28 : 24; 
+            this.h = type === 'KOOPA' ? 36 : 24;
+            this.baseSpeed = 1.5; 
+            this.speed = this.baseSpeed * speedMul;
+            this.dir = 1; this.alive = true; this.isStomped = false; this.stompTimer = 0;
+            this.hp = 10; this.maxHp = 10; this.startX = x - 50; this.endX = x + 50;
+        }
+        getRect() { return { x: this.x, y: this.y, w: this.w, h: this.h }; }
+        update(dt) {
+            if (!this.alive) return;
+            if (this.isStomped) { this.stompTimer += dt; if (this.stompTimer > 2.0) this.alive = false; return; }
+            this.x += this.speed * this.dir;
+            if (this.x >= this.endX) this.dir = -1;
+            if (this.x <= this.startX) this.dir = 1;
+        }
+        stomp(audio) {
+            if (this.isStomped || !this.alive) return;
+            this.isStomped = true; audio.playSound('stomp'); this.speed = 0;
+        }
+        takeDamage(dmg, audio) {
+            if (this.isStomped) return;
+            this.hp -= dmg; audio.playSound('hit');
+            if (this.hp <= 0) this.alive = false;
+        }
+        draw(ctx, cameraX) {
+            if (!this.alive) return;
+            const sx = this.x - cameraX, sy = this.y;
+            const scale = 1.6;
+
+            if (this.isStomped) {
+                ctx.fillStyle = this.type === 'GOOMBA' ? '#cc7a3a' : '#4caf50';
+                ctx.fillRect(sx + 5, sy + this.h - 8, this.w - 10, 5);
+                return;
+            }
+
+            const pixels = [];
+            if (this.type === 'GOOMBA') {
+                pixels.push([2, 18, 6, 5, '#222'], [14, 18, 6, 5, '#222'], [5, 13, 12, 6, '#f5d6c6']);
+                pixels.push([2, 3, 5, 3, '#cc7a3a'], [7, 1, 8, 3, '#cc7a3a'], [15, 3, 5, 3, '#cc7a3a']);
+                pixels.push([0, 6, 22, 8, '#cc7a3a'], [0, 14, 22, 2, '#a8602a'], [3, 8, 5, 5, '#fff'], [14, 8, 5, 5, '#fff']);
+                if (this.dir > 0) pixels.push([6, 10, 2, 3, '#000'], [17, 10, 2, 3, '#000']);
+                else pixels.push([3, 10, 2, 3, '#000'], [14, 10, 2, 3, '#000']);
+            } else {
+                pixels.push([3, 9, 20, 16, '#4caf50'], [6, 12, 3, 3, '#2e7d32'], [17, 12, 3, 3, '#2e7d32']);
+                pixels.push([11, 9, 3, 3, '#2e7d32'], [6, 18, 3, 3, '#2e7d32'], [17, 18, 3, 3, '#2e7d32']);
+                pixels.push([3, 25, 20, 6, '#f5a87c'], [1, 30, 6, 5, '#d3803a'], [19, 30, 6, 5, '#d3803a']);
+                pixels.push([18, -1, 8, 10, '#f5a87c'], [21, 1, 6, 5, '#fff']);
+                if (this.dir > 0) pixels.push([24, 3, 3, 3, '#000']);
+                else pixels.push([21, 3, 3, 3, '#000']);
+            }
+
+            for (const p of pixels) {
+                ctx.fillStyle = p[4];
+                ctx.fillRect(sx + p[0] * scale, sy + p[1] * scale, p[2] * scale, p[3] * scale);
+            }
+            const hpW = (this.w - 2) * (this.hp/this.maxHp);
+            ctx.fillStyle = '#333'; ctx.fillRect(sx + 1, sy - 5, this.w - 2, 3);
+            ctx.fillStyle = '#0f0'; ctx.fillRect(sx + 1, sy - 5, hpW, 3);
+        }
+    }
+
+    // ---- 道具(蘑菇和花) ----
+    class Item {
+        constructor(x, y, type) {
+            this.x = x; this.y = y; this.w = 24; this.h = 24;
+            this.type = type;
+            this.active = true;
+        }
+        getRect() { return { x: this.x, y: this.y, w: this.w, h: this.h }; }
+        draw(ctx, cameraX) {
+            if (!this.active) return;
+            const sx = this.x - cameraX, sy = this.y;
+            const scale = 2;
+            if (this.type === 'MUSHROOM') {
+                const pixels = [
+                    [2, 8, 8, 4, '#e88a3a'], [0, 12, 12, 4, '#e88a3a'], [4, 4, 4, 4, '#e88a3a'],
+                    [1, 4, 2, 4, '#c04020'], [9, 4, 2, 4, '#c04020'], [2, 12, 2, 2, '#c04020'], [8, 12, 2, 2, '#c04020'],
+                    [4, 16, 4, 6, '#fcfcfc'], [2, 18, 2, 2, '#eaeaea'], [6, 20, 2, 2, '#eaeaea']
+                ];
+                for (const p of pixels) ctx.fillStyle = p[4], ctx.fillRect(sx + p[0]*scale, sy + p[1]*scale, p[2]*scale, p[3]*scale);
+            } else {
+                const pixels = [
+                    [4, 4, 4, 6, '#fcfcfc'], [2, 8, 2, 2, '#fcfcfc'], [8, 8, 2, 2, '#fcfcfc'], [0, 10, 12, 4, '#fcfcfc'],
+                    [4, 4, 4, 2, '#efa040'], [4, 8, 4, 6, '#efa040'], [2, 8, 2, 4, '#efa040'], [8, 8, 2, 4, '#efa040'],
+                    [4, 6, 4, 4, '#e04020'], [4, 16, 4, 4, '#4caf50'], [1, 18, 2, 2, '#4caf50'], [9, 18, 2, 2, '#4caf50']
+                ];
+                for (const p of pixels) ctx.fillStyle = p[4], ctx.fillRect(sx + p[0]*scale, sy + p[1]*scale, p[2]*scale, p[3]*scale);
+            }
+        }
+    }
+
+    // ---- 子弹 ----
+    class Bullet {
+        constructor(x, y, dir, level, angleOffset = 0) {
+            this.x = x; this.y = y; this.active = true; this.level = level; this.damage = 1;
+            let speed = 12, w = 15, h = 4, color = '#fff';
+            if (level === 'M_GUN') speed = 16, color = '#ff3232', w = 20, h = 6, this.damage = 2;
+            else if (level === 'S_GUN') speed = 14, color = '#3296ff', w = 12, h = 4, this.damage = 1;
+            const rad = angleOffset * Math.PI / 180;
+            this.vx = speed * dir * Math.cos(rad); this.vy = speed * Math.sin(rad);
+            this.w = w; this.h = h; this.color = color;
+        }
+        getRect() { return { x: this.x, y: this.y, w: this.w, h: this.h }; }
+        update() { this.x += this.vx; this.y += this.vy; if (this.x > WORLD_W || this.x < 0 || this.y > SCREEN_H || this.y < 0) this.active = false; }
+    }
+
+    // ---- 💥 像素火球（Boss专属弹幕） ----
+    class Fireball {
+        constructor(x, y, tx, ty, speedMul = 1.0) {
+            this.x = x; this.y = y; this.r = 20;
+            this.baseSpeed = 4; this.speed = this.baseSpeed * speedMul;
+            this.active = true; 
+            const dx = tx - x, dy = ty - y, dist = Math.hypot(dx, dy);
+            if (dist > 0) this.vx = (dx / dist) * this.speed, this.vy = (dy / dist) * this.speed;
+            else this.vx = 1, this.vy = 0;
+        }
+        getRect() { return { x: this.x - this.r, y: this.y - this.r, w: this.r*2, h: this.r*2 }; }
+        update() { this.x += this.vx; this.y += this.vy; if (this.x < 0 || this.x > WORLD_W || this.y < 0 || this.y > SCREEN_H) this.active = false; }
+        
+        // 🎨 像素火球绘制
+        draw(ctx, cameraX) {
+            if (!this.active) return;
+            const sx = this.x - cameraX, sy = this.y;
+            const scale = 2;
+            const px = sx - 10; const py = sy - 8;
+            const pixels = [
+                [-12, 7, 8, 2, '#d04020'], [-6, 8, 4, 2, '#d04020'],
+                [-4, 1, 8, 4, '#d04020'], [-2, 5, 12, 4, '#d04020'],
+                [8, 1, 8, 4, '#d04020'], [10, 5, 8, 4, '#d04020'],
+                [16, 4, 6, 8, '#d04020'], [20, 2, 4, 8, '#d04020'],
+                [0, 9, 10, 4, '#d04020'], [10, 9, 8, 4, '#d04020'],
+                [6, 3, 8, 4, '#f09030'], [2, 7, 6, 4, '#f09030'], 
+                [12, 7, 6, 4, '#f09030'], [18, 6, 4, 4, '#f09030'],
+                [14, 5, 6, 4, '#fcfcfc'], [18, 8, 4, 2, '#fcfcfc'],
+                [8, 5, 4, 2, '#f0d090'] 
+            ];
+            for (const p of pixels) { ctx.fillStyle = p[4]; ctx.fillRect(px + p[0]*scale, py + p[1]*scale, p[2]*scale, p[3]*scale); }
+        }
+    }
+
+    // ---- 🐢 大龟壳 Boss ----
+    class Boss {
+        constructor(x, y, level) {
+            this.x = x; this.y = y; 
+            this.w = 96; this.h = 80;
+            this.baseSpeed = 1.0; this.speed = this.baseSpeed * (1 + (level - 1) * 0.08);
+            this.dir = -1; this.alive = true; this.hp = 40 + level * 10; this.maxHp = this.hp;
+            this.yVel = 0; this.gravity = 0.8; this.onGround = false; this.jumpClock = 0; this.laserClock = 0; this.fireClock = 0;
+            this.fireballs = []; this.lasers = []; 
+            this.level = level;
+            this.fireInterval = Math.max(1.2, 3.0 - (level - 1) * 0.18);
+            this.laserInterval = Math.max(4.0, 8.0 - (level - 1) * 0.4);
+            this.jumpInterval = Math.max(0.5, 1.0 - (level - 1) * 0.05);
+            this.bossX = x;
+            this.hitFlash = 0;
+        }
+        getRect() { return { x: this.x, y: this.y, w: this.w, h: this.h }; }
+        isOnScreen(cameraX) { return this.x + this.w > cameraX && this.x < cameraX + SCREEN_W; }
+        update(dt, playerX, playerY, platforms, audio) {
+            if (!this.alive) return;
+            if (this.hitFlash > 0) this.hitFlash -= dt;
+            
+            this.x += this.speed * this.dir;
+            if (this.x < this.bossX - 200) this.dir = 1;
+            if (this.x > this.bossX + 200) this.dir = -1;
+            this.jumpClock += dt;
+            if (this.jumpClock > this.jumpInterval && this.onGround) {
+                this.yVel = -10 - this.level * 0.2; this.jumpClock = 0; this.onGround = false;
+            }
+            this.yVel += this.gravity; this.y += this.yVel; this.onGround = false;
+            for (const p of platforms) {
+                if (!p.active) continue;
+                const pr = p.getRect(), br = this.getRect();
+                if (rectIntersect(br, pr) && this.yVel > 0) { this.y = pr.y - this.h; this.yVel = 0; this.onGround = true; }
+            }
+            
+            this.fireClock += dt;
+            if (this.fireClock > this.fireInterval) {
+                const startX = this.dir === 1 ? this.x + this.w : this.x - 20;
+                this.fireballs.push(new Fireball(startX, this.y + 20, playerX, playerY, 1 + (this.level - 1) * 0.06));
+                this.fireClock = 0;
+            }
+            this.laserClock += dt;
+            if (this.laserClock > this.laserInterval) {
+                const ly = this.y + this.h/2 - 15;
+                this.lasers.push({ x: 0, y: ly, w: this.x + this.w/2, h: 30, active: true, life: 1.5 });
+                this.lasers.push({ x: this.x + this.w/2, y: ly, w: WORLD_W - (this.x + this.w/2), h: 30, active: true, life: 1.5 });
+                this.laserClock = 0, audio.playSound('laser');
+            }
+            for (const fb of this.fireballs) fb.update();
+            this.fireballs = this.fireballs.filter(f => f.active);
+            for (const l of this.lasers) l.life -= dt, l.active = l.life > 0;
+            this.lasers = this.lasers.filter(l => l.active);
+        }
+        takeDamage(dmg, audio) { 
+            this.hp -= dmg; 
+            this.hitFlash = 0.2;
+            audio.playSound('hit'); 
+            if (this.hp <= 0) this.alive = false; 
+        }
+        
+        draw(ctx, cameraX) {
+            if (!this.alive) return;
+            const sx = this.x - cameraX, sy = this.y;
+            if (this.hitFlash > 0 && Math.floor(Date.now() / 100) % 2 === 0) ctx.globalAlpha = 0.7;
+
+            const scale = 2;
+            const px = sx + 5; const py = sy;
+            const pixels = [
+                [0, 26, 24, 14, '#f5a87c'], [24, 30, 10, 10, '#f5a87c'],
+                [4, 38, 14, 4, '#d3803a'], [28, 38, 6, 4, '#d3803a'],
+                [8, 0, 30, 30, '#4caf50'], [30, 0, 20, 34, '#4caf50'],
+                [0, 20, 8, 16, '#4caf50'], [48, 10, 12, 24, '#4caf50'],
+                [6, 18, 6, 6, '#fcfcfc'], [42, 14, 6, 6, '#fcfcfc'],
+                [38, 28, 6, 6, '#fcfcfc'], [10, 30, 6, 6, '#fcfcfc'],
+                [26, 12, 6, 6, '#fcfcfc'], [16, 6, 8, 4, '#2e7d32'],
+                [32, 10, 4, 4, '#2e7d32'], [8, 28, 4, 4, '#2e7d32'],
+                [40, 22, 4, 4, '#2e7d32'], [22, 20, 4, 4, '#2e7d32'],
+                [4, 32, 8, 6, '#fff'], [6, 34, 4, 4, '#000']
+            ];
+            for (const p of pixels) { ctx.fillStyle = p[4]; ctx.fillRect(px + p[0]*scale, py + p[1]*scale, p[2]*scale, p[3]*scale); }
+            ctx.globalAlpha = 1;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(SCREEN_W/2 - 160, 30, 320, 20);
+            const hpPct = this.hp / this.maxHp;
+            ctx.fillStyle = hpPct > 0.3 ? '#44ff44' : '#ff4444';
+            ctx.fillRect(SCREEN_W/2 - 158, 32, 316 * hpPct, 16);
+            ctx.fillStyle = '#fff'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
+            ctx.fillText(`🐢 大龟壳 HP: ${this.hp}/${this.maxHp}`, SCREEN_W/2, 48);
+            ctx.textAlign = 'left';
+            
+            for (const fb of this.fireballs) fb.draw(ctx, cameraX); 
+            for (const l of this.lasers) { if (!l.active) continue; ctx.fillStyle = 'rgba(255, 255, 255, 0.5)'; ctx.fillRect(l.x - cameraX, l.y, l.w, l.h); ctx.fillStyle = 'rgba(255, 0, 0, 0.3)'; ctx.fillRect(l.x - cameraX, l.y + 5, l.w, l.h - 10); }
+        }
+    }
+
+    // ---- 🎮 玩家(像素魂斗罗) ----
+    class Contra {
+        constructor(x, y) {
+            this.x = x; this.y = y; this.w = 30; this.h = 50;      
+            this.normalH = 50; this.crouchH = 25;
+            this.speed = 5; this.crouchSpeed = 2;
+            this.dir = 1; this.yVel = 0; this.gravity = 0.8; this.jumpPower = 14;
+            this.onGround = false; this.lives = 30;
+            this.weapon = 'NORMAL'; this.isInvincible = false;
+            this.invincibleTimer = 0; this.isDead = false; this.shootCooldown = 0;
+            this.shootDelay = 0.1; this.canShoot = true; this.isCrouching = false;
+            this.shootAngle = 0; this.deathX = x; this.deathY = y;
+            this.bullets = []; this.rect = { x: this.x, y: this.y, w: this.w, h: this.h };
+            this.fallTimer = 0; this.isFalling = false;
+        }
+        getRect() { const h = this.isCrouching ? this.crouchH : this.normalH; return { x: this.x, y: this.y, w: this.w, h: h }; }
+        update(platforms, dt, audio, levelTheme) {
+            if (this.isDead) return;
+            this.shootCooldown -= dt; if (this.shootCooldown <= 0) this.canShoot = true;
+            if (this.isInvincible) { this.invincibleTimer -= dt; if (this.invincibleTimer <= 0) this.isInvincible = false; }
+            if (this.y > SCREEN_H + 50) {
+                if (!this.isFalling) { this.isFalling = true; this.fallTimer = 0; audio.playSound('fall'); }
+                this.fallTimer += dt;
+                if (this.fallTimer > 0.5) {
+                    this.lives--; audio.playSound('explode');
+                    if (this.lives <= 0) this.isDead = true;
+                    else {
+                        let spawnY = 400; for (const p of platforms) { if (p.active && p.y + p.h < 500) { spawnY = p.y - this.normalH; break; } }
+                        this.x = Math.max(50, Math.min(WORLD_W - this.w, this.x));
+                        this.y = spawnY; this.yVel = -5; this.isFalling = false; this.startInvincibility();
+                    }
+                }
+                return;
+            }
+            this.isFalling = false;
+            if (levelTheme === 'water') this.gravity = 0.3, this.jumpPower = 10, this.y < 100 && (this.y += 1);
+            else this.gravity = 0.8, this.jumpPower = 14;
+            let move = 0; if (keyState['ArrowLeft']) move = -1; if (keyState['ArrowRight']) move = 1;
+            const pressUp = keyState['ArrowUp'] || false; const pressDown = keyState['ArrowDown'] || false;
+            this.isCrouching = pressDown && this.onGround && levelTheme !== 'water';
+            if (pressUp) { this.shootAngle = -90; if (this.onGround) { this.yVel = -this.jumpPower; this.onGround = false; audio.playSound('jump'); this.isCrouching = false; } }
+            else { this.shootAngle = 0; }
+            const spd = this.isCrouching ? this.crouchSpeed : this.speed;
+            if (move !== 0) { this.x += spd * move; this.dir = move > 0 ? 1 : -1; if (this.x < 0) this.x = 0; if (this.x > WORLD_W - this.w) this.x = WORLD_W - this.w; }
+            this.yVel += this.gravity; this.y += this.yVel;
+            const rect = this.getRect(); this.rect = { x: this.x, y: this.y, w: this.w, h: rect.h };
+            this.onGround = false;
+            for (const p of platforms) { if (!p.active) continue; const pr = p.getRect(); if (rectIntersect(this.rect, pr) && this.yVel > 0) { this.y = pr.y - rect.h; this.yVel = 0; this.onGround = true; } }
+            if (levelTheme === 'water' && this.y < 20) this.y = 20, this.yVel = 0;
+            for (const b of this.bullets) b.update();
+            this.bullets = this.bullets.filter(b => b.active);
+        }
+        shoot(audio) {
+            if (this.isDead || !this.canShoot) return;
+            const dir = this.dir, h = this.isCrouching ? this.crouchH : this.normalH;
+            const bx = dir === 1 ? this.x + this.w : this.x - 15, by = this.y + h/2, angle = this.shootAngle;
+            if (this.weapon === 'S_GUN') this.bullets.push(new Bullet(bx, by, dir, this.weapon, angle - 15), new Bullet(bx, by, dir, this.weapon, angle), new Bullet(bx, by, dir, this.weapon, angle + 15));
+            else this.bullets.push(new Bullet(bx, by, dir, this.weapon, angle));
+            audio.playSound('shoot'); this.canShoot = false; this.shootCooldown = this.shootDelay;
+        }
+        checkStompEnemies(enemies, audio) {
+            if (this.isInvincible || this.yVel >= 0) return;
+            const feetY = this.y + (this.isCrouching ? this.crouchH : this.normalH) - 5;
+            const feetRect = { x: this.x + 5, y: feetY, w: this.w - 10, h: 10 };
+            for (const e of enemies) { if (!e.alive || e.isStomped) continue; const er = e.getRect(); if (rectIntersect(feetRect, er)) { e.stomp(audio); this.yVel = -this.jumpPower * 0.7; break; } }
+        }
+        takeDamage(audio) {
+            if (this.isInvincible || this.isDead) return;
+            audio.playSound('downgrade');
+            if (this.weapon === 'S_GUN') this.weapon = 'M_GUN';
+            else if (this.weapon === 'M_GUN') this.weapon = 'NORMAL';
+            else { this.handleDeath(false, audio); return; }
+            this.startInvincibility();
+        }
+        takeLaserDamage(audio) { if (this.isInvincible || this.isDead) return; this.handleDeath(false, audio); }
+        handleDeath(isFalling, audio) { this.deathX = this.x, this.deathY = this.y, this.lives--, audio.playSound('explode'); if (this.lives <= 0) this.isDead = true; else this.x = this.deathX, this.y = this.deathY, this.yVel = -this.jumpPower, this.startInvincibility(); }
+        startInvincibility() { this.isInvincible = true; this.invincibleTimer = 5.0; }
+
+        draw(ctx, cameraX, dt) {
+            if (this.isDead) return;
+            if (this.isInvincible && Math.floor(Date.now() / 100) % 2 === 0) return;
+
+            const sx = this.x - cameraX; 
+            const sy = this.y - 2; // 永不扎地偏移
+            const dir = this.dir;
+            const scale = 2; 
+            const px = sx + 5; const py = sy;
+            const pixels = [];
+
+            if (this.isCrouching) {
+                pixels.push([6, 1, 10, 8, '#e8b48c']);
+                if (dir > 0) pixels.push([12, 4, 2, 2, '#222']);
+                else pixels.push([8, 4, 2, 2, '#222']);
+                pixels.push([10, 7, 4, 1, '#8a4a3a']);
+                pixels.push([2, 9, 20, 10, '#e8b48c']);
+                pixels.push([0, 19, 20, 6, '#2244aa']);
+                pixels.push([0, 22, 4, 2, '#222']);
+                pixels.push([16, 22, 4, 2, '#222']);
+                if (dir > 0) { pixels.push([22, 14, 8, 2, '#666']); pixels.push([22, 16, 3, 2, '#888']); }
+                else { pixels.push([-10, 14, 8, 2, '#666']); pixels.push([-5, 16, 3, 2, '#888']); }
+            } else {
+                pixels.push([4, 1, 8, 8, '#e8b48c']);
+                pixels.push([3, 1, 2, 2, '#cc2233']); 
+                pixels.push([11, 1, 2, 2, '#cc2233']);
+                if (dir > 0) pixels.push([8, 3, 2, 2, '#222']); 
+                else pixels.push([6, 3, 2, 2, '#222']);
+                pixels.push([5, 7, 6, 1, '#8a4a3a']);
+                pixels.push([2, 11, 12, 6, '#e8b48c']);
+                pixels.push([2, 19, 12, 8, '#2244aa']);
+                pixels.push([1, 27, 5, 6, '#2244aa']);
+                pixels.push([10, 27, 5, 6, '#2244aa']);
+                pixels.push([0, 32, 6, 2, '#222']);
+                pixels.push([10, 32, 6, 2, '#222']);
+                if (dir > 0) { pixels.push([14, 13, 4, 6, '#e8b48c']); pixels.push([-2, 13, 4, 6, '#e8b48c']); pixels.push([18, 15, 8, 2, '#666']); pixels.push([18, 17, 3, 2, '#888']); }
+                else { pixels.push([-2, 13, 4, 6, '#e8b48c']); pixels.push([14, 13, 4, 6, '#e8b48c']); pixels.push([-10, 15, 8, 2, '#666']); pixels.push([-5, 17, 3, 2, '#888']); }
+            }
+
+            for (const p of pixels) { ctx.fillStyle = p[4]; ctx.fillRect(px + p[0] * scale, py + p[1] * scale, p[2] * scale, p[3] * scale); }
+            for (const b of this.bullets) { ctx.fillStyle = b.color; ctx.fillRect(b.x - cameraX, b.y, b.w, b.h); }
+        }
+    }
+
+    window._fireworks = [];
+
+    // ---- 关卡生成器 ----
+    function generateLevel(level) {
+        const platforms = []; let enemies = []; let items = []; let fireBlocks = []; let launchers = [];
+        let bossX = 9500, bossY = 408; let theme = 'ground'; let bgColor = '#87ceeb'; let groundColor = '#64c864';
+        const speedMul = 1 + (level - 1) * 0.12; const enemyCount = 18 + (level - 1) * 5; const launcherCount = 10 + (level - 1) * 2;
+        const rng = (seed) => { let s = seed * 12345 + 6789; return () => { s = (s * 9301 + 49297) % 233280; return s / 233280; }; };
+        const rand = rng(level * 777);
+        switch(level) {
+            case 1: theme = 'ground'; bgColor = '#87ceeb'; groundColor = '#64c864'; break;
+            case 2: theme = 'underground'; bgColor = '#2a1a0a'; groundColor = '#8a7a5a'; break;
+            case 3: theme = 'sky'; bgColor = '#4a7af7'; groundColor = '#8a8a8a'; break;
+            case 4: theme = 'lava'; bgColor = '#3a0a0a'; groundColor = '#8a3a1a'; break;
+            case 5: theme = 'ground'; bgColor = '#87ceeb'; groundColor = '#64c864'; break;
+            case 6: theme = 'water'; bgColor = '#1a4a7a'; groundColor = '#3a7a5a'; break;
+            case 7: theme = 'sky'; bgColor = '#4a7af7'; groundColor = '#8a8a8a'; break;
+            case 8: theme = 'lava'; bgColor = '#3a0a0a'; groundColor = '#8a3a1a'; break;
+        }
+        platforms.push(new Platform(0, 520, 1200, 80, true, false, groundColor));
+        platforms.push(new Platform(1300, 520, 1200, 80, true, false, groundColor));
+        platforms.push(new Platform(2600, 520, 1200, 80, true, false, groundColor));
+        platforms.push(new Platform(3900, 520, 1200, 80, true, false, groundColor));
+        platforms.push(new Platform(5200, 520, 1200, 80, true, false, groundColor));
+        platforms.push(new Platform(6500, 520, 1200, 80, true, false, groundColor));
+        platforms.push(new Platform(7800, 520, 1200, 80, true, false, groundColor));
+        platforms.push(new Platform(9100, 520, 1000, 80, true, false, groundColor));
+        for (let i = 0; i < 25 + level * 3; i++) { const x = 200 + i * 280 + rand() * 150; const y = 380 + (i % 3) * 40 - (level % 3) * 10; platforms.push(new Platform(x, y, 80 + rand() * 80, 30, false, true)); }
+        for (let i = 0; i < enemyCount; i++) { const x = 200 + i * (8800 / (enemyCount + 1)) + rand() * 100; const y = 488 - (i % 3) * 20; const type = i % 2 === 0 ? 'GOOMBA' : 'KOOPA'; enemies.push(new Enemy(x, y, type, speedMul)); }
+        for (let i = 0; i < 3 + level * 2; i++) { const x = 300 + i * 600 + rand() * 150; const y = 390 - (i % 3) * 30; const type = i % 2 === 0 ? 'MUSHROOM' : 'FLOWER'; items.push(new Item(x, y, type)); }
+        for (let i = 0; i < launcherCount; i++) { const x = 150 + i * (9000 / (launcherCount + 1)) + rand() * 80; const y = 480 + (i % 3) * 10; const dir = i % 2 === 0 ? 1 : -1; if (x > 9000) continue; launchers.push(new MissileLauncher(x, y, dir)); }
+        if (level === 4 || level === 8) { const count = level === 4 ? 12 : 20; for (let i = 0; i < count; i++) { const x = 150 + i * 400 + rand() * 100; const y = 450 + (i % 2 === 0 ? 0 : 50); const type = i % 2 === 0 ? 'vertical' : 'horizontal'; const speed = 0.8 + Math.random() * 1.2; const range = 40 + Math.random() * 50; fireBlocks.push(new FireBlock(x, y, 30, 20, type, speed, range)); } }
+        bossX = 9400; bossY = 408;
+        return { platforms, enemies, items, fireBlocks, launchers, bossX, bossY, theme, bgColor, groundColor };
+    }
+
+    function resetGame() {
+        gameWon = false; victoryCelebrating = false; fireworks = []; window._fireworks = fireworks;
+        currentLevel = 1; levelDisplay.textContent = '1';
+        levelData = generateLevel(currentLevel); platforms = levelData.platforms; enemies = levelData.enemies;
+        fireBlocks = levelData.fireBlocks || []; launchers = levelData.launchers || [];
+        boss = new Boss(levelData.bossX, levelData.bossY, currentLevel); items = levelData.items;
+        theme = levelData.theme; bgColor = levelData.bgColor;
+        player = new Contra(100, 400); player.lives = 30; levelComplete = false; cameraX = 0;
+    }
+
+    let currentLevel = 1; let gameWon = false; let levelData = generateLevel(currentLevel);
+    let player = new Contra(100, 400); let platforms = levelData.platforms; let enemies = levelData.enemies;
+    let fireBlocks = levelData.fireBlocks || []; let launchers = levelData.launchers || [];
+    let boss = new Boss(levelData.bossX, levelData.bossY, currentLevel); let items = levelData.items;
+    let theme = levelData.theme; let bgColor = levelData.bgColor; let cameraX = 0; let levelComplete = false;
+    let fireworks = []; let victoryTimer = 0; let victoryCelebrating = false;
+    window._fireworks = fireworks;
+
+    const keyState = {};
+    document.addEventListener('keydown', (e) => {
+        const key = e.key; keyState[key] = true;
+        if (key === 'j' || key === 'J') { e.preventDefault(); if (!player.isDead && !gameWon && !levelComplete) player.shoot(audio); }
+        if (key === 'n' || key === 'N') { if (!player.isDead && !gameWon) nextLevel(); }
+        if (key === 'r' || key === 'R') { resetGame(); }
+        if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(key)) e.preventDefault();
+    });
+    document.addEventListener('keyup', (e) => { keyState[e.key] = false; });
+
+    function nextLevel() {
+        if (currentLevel >= 8) {
+            gameWon = true; victoryCelebrating = true; victoryTimer = 0; audio.playVictory();
+            for (let i = 0; i < 30; i++) { setTimeout(() => { const isGolden = Math.random() < 0.3; fireworks.push(new Firework(null, null, isGolden)); }, i * 200); }
+            return;
+        }
+        currentLevel++; levelDisplay.textContent = currentLevel;
+        levelData = generateLevel(currentLevel); platforms = levelData.platforms; enemies = levelData.enemies;
+        fireBlocks = levelData.fireBlocks || []; launchers = levelData.launchers || [];
+        boss = new Boss(levelData.bossX, levelData.bossY, currentLevel); items = levelData.items;
+        theme = levelData.theme; bgColor = levelData.bgColor;
+        player.x = 100; player.y = 400; player.bullets = []; player.isDead = false; player.isFalling = false;
+        player.weapon = 'NORMAL'; player.isInvincible = false; levelComplete = false; cameraX = 0;
+    }
+
+    function gameLoop() {
+        const dt = Math.min(0.05, 1/60);
+        for (const fw of fireworks) fw.update(); fireworks = fireworks.filter(fw => !fw.isDead()); window._fireworks = fireworks;
+        if (victoryCelebrating) {
+            victoryTimer += dt;
+            if (victoryTimer % 0.5 < dt) { const isGolden = Math.random() < 0.25; fireworks.push(new Firework(null, null, isGolden)); if (Math.random() < 0.3) fireworks.push(new Firework(null, null, true)); }
+        } else if (!player.isDead && !gameWon && !levelComplete) {
+            player.update(platforms, dt, audio, theme); player.checkStompEnemies(enemies, audio);
+            for (const e of enemies) e.update(dt); boss.update(dt, player.x, player.y, platforms, audio);
+            for (const l of launchers) l.update(dt, player.x, player.y, cameraX);
+            const allMissiles = []; for (const l of launchers) { for (const m of l.getMissiles()) allMissiles.push(m); }
+            for (const fb of fireBlocks) fb.update(dt);
+            for (const item of items) { 
+                if (!item.active) continue; 
+                const ir = item.getRect(), pr = player.getRect(); 
+                if (rectIntersect(pr, ir)) { item.active = false; audio.playSound('powerup'); if (item.type === 'MUSHROOM') player.weapon = 'M_GUN'; else if (item.type === 'FLOWER') player.weapon = 'S_GUN'; } 
+            }
+            const bossOnScreen = boss.isOnScreen(cameraX);
+            for (const b of player.bullets) {
+                if (!b.active) continue; const br = b.getRect();
+                for (const e of enemies) { if (!e.alive) continue; const er = e.getRect(); if (rectIntersect(br, er)) { b.active = false; e.takeDamage(b.damage, audio); } }
+                for (const l of launchers) { if (!l.active) continue; const lr = l.getRect(); if (rectIntersect(br, lr)) { b.active = false; l.takeDamage(b.damage, audio); } }
+                for (const m of allMissiles) { if (!m.active) continue; const mr = m.getRect(); if (rectIntersect(br, mr)) { b.active = false; m.active = false; audio.playSound('explode2'); for (let i = 0; i < 5; i++) { const fw = new Firework(m.x + Math.random()*10, m.y + Math.random()*10, false); fireworks.push(fw); } } }
+                if (bossOnScreen && boss.alive) { const br2 = boss.getRect(); if (rectIntersect(br, br2)) { b.active = false; boss.takeDamage(b.damage, audio); } }
+                // 🔒 砖块无敌：删除了子弹破坏平台的代码
+            }
+            if (!player.isInvincible && !player.isFalling) {
+                const pr = player.getRect(); for (const m of allMissiles) { if (!m.active) continue; const mr = m.getRect(); if (rectIntersect(pr, mr)) { m.active = false; player.takeDamage(audio); audio.playSound('explode2'); for (let i = 0; i < 8; i++) { const fw = new Firework(m.x + Math.random()*10, m.y + Math.random()*10, false); fireworks.push(fw); } break; } }
+            }
+            if (!player.isInvincible && !player.isFalling) { const pr = player.getRect(); for (const fb of fireBlocks) { if (!fb.active) continue; const fr = fb.getRect(); if (rectIntersect(pr, fr)) { player.takeDamage(audio); audio.playSound('fire'); break; } } }
+            if (!player.isInvincible && !player.isFalling) {
+                for (const fb of boss.fireballs) { if (!fb.active) continue; const fr = fb.getRect(); const pr = player.getRect(); if (rectIntersect(pr, fr)) { player.takeDamage(audio); fb.active = false; } }
+                for (const e of enemies) { if (!e.alive || e.isStomped) continue; const er = e.getRect(); const pr = player.getRect(); if (rectIntersect(pr, er)) { player.takeDamage(audio); } }
+                for (const l of boss.lasers) { if (!l.active) continue; const lr = { x: l.x, y: l.y, w: l.w, h: l.h }; const pr = player.getRect(); if (rectIntersect(pr, lr)) { player.takeLaserDamage(audio); } }
+            }
+            if (!boss.alive && !levelComplete) { levelComplete = true; audio.playSound('1up'); setTimeout(() => { if (!gameWon) nextLevel(); }, 1500); }
+            if (player.isDead) { setTimeout(() => { if (player.lives > 0) { player.x = 100; player.y = 400; player.bullets = []; player.isDead = false; player.isFalling = false; player.weapon = 'NORMAL'; player.isInvincible = true; player.invincibleTimer = 3.0; boss = new Boss(levelData.bossX, levelData.bossY, currentLevel); enemies = levelData.enemies.map(e => new Enemy(e.startX + 50, e.y, e.type, 1 + (currentLevel - 1) * 0.12)); items = levelData.items.map(it => new Item(it.x, it.y, it.type)); fireBlocks = levelData.fireBlocks ? levelData.fireBlocks.map(fb => new FireBlock(fb.startX, fb.startY, fb.w, fb.h, fb.moveType, fb.speed, fb.range)) : []; launchers = levelData.launchers ? levelData.launchers.map(l => new MissileLauncher(l.x, l.y, l.direction)) : []; } }, 1000); }
+        }
+        const targetX = player.x + player.w/2 - SCREEN_W/2; cameraX = Math.max(0, Math.min(targetX, WORLD_W - SCREEN_W));
+        ctx.clearRect(0, 0, SCREEN_W, SCREEN_H);
+        if (victoryCelebrating) drawSunset(ctx, victoryTimer);
+        else {
+            ctx.fillStyle = bgColor; ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
+            if (theme === 'lava') for (let i = 0; i < 20; i++) { const x = (i * 43 + Date.now() * 0.02) % SCREEN_W; const y = 520 + Math.sin(i + Date.now() * 0.003) * 8; ctx.fillStyle = `rgba(255, ${80 + Math.sin(i*2 + Date.now()*0.005)*30}, 0, 0.3)`; ctx.fillRect(x, y, 30 + Math.sin(i)*10, 10); }
+            if (theme === 'water') for (let i = 0; i < 30; i++) { const x = (i * 37 + Date.now() * 0.015) % SCREEN_W; const y = 20 + i * 20 + Math.sin(i + Date.now() * 0.002) * 5; ctx.fillStyle = `rgba(100, 200, 255, 0.08)`; ctx.fillRect(x, y, 40, 3); }
+        }
+        if (!victoryCelebrating) {
+            for (const p of platforms) { 
+                if (!p.active) continue; 
+                // 🧱 统一渲染所有砖块（地面也绘制成砖块！）
+                let levelNum = 1;
+                if ([1, 5].includes(currentLevel)) levelNum = 1;
+                else if (currentLevel === 2) levelNum = 2;
+                else if ([3, 7].includes(currentLevel)) levelNum = 3;
+                else if ([4, 8].includes(currentLevel)) levelNum = 4;
+                else if (currentLevel === 6) levelNum = 6;
+                p.drawCommonBrick(ctx, cameraX, levelNum); 
+            }
+            for (const fb of fireBlocks) fb.draw(ctx, cameraX); for (const l of launchers) l.draw(ctx, cameraX);
+            for (const e of enemies) { if (e.alive) e.draw(ctx, cameraX); }
+            if (boss.alive) boss.draw(ctx, cameraX); 
+            for (const item of items) { if (item.active) item.draw(ctx, cameraX); }
+            player.draw(ctx, cameraX, dt);
+        }
+        for (const fw of fireworks) fw.draw(ctx);
+        if (!victoryCelebrating) {
+            ctx.fillStyle = '#fff'; ctx.font = 'bold 15px "Segoe UI", system-ui'; ctx.shadowColor = '#000'; ctx.shadowBlur = 8;
+            let wStr = 'Normal'; if (player.weapon === 'M_GUN') wStr = 'M-Gun'; if (player.weapon === 'S_GUN') wStr = 'S-Gun';
+            const themeNames = { ground: '地面', underground: '地下', sky: '空中', lava: '岩浆', water: '水下' };
+            const launcherCount = launchers.filter(l => l.active).length; const fireCount = fireBlocks.length > 0 ? ` 🔥${fireBlocks.length}个火块` : '';
+            ctx.fillText(`第${currentLevel}/8关 (${themeNames[theme]||'地面'})  |  ${wStr}  |  命:${player.lives}  |  🚀${launcherCount}个导弹${fireCount}  |  R键重开`, 16, 30);
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(SCREEN_W - 180, 10, 170, 12);
+            ctx.fillStyle = 'rgba(255,255,255,0.3)'; const mapX = (player.x / WORLD_W) * 170; ctx.fillRect(SCREEN_W - 180 + mapX, 10, 3, 12);
+            ctx.fillStyle = 'rgba(255,0,0,0.5)'; const bossMapX = (boss.x / WORLD_W) * 170; ctx.fillRect(SCREEN_W - 180 + bossMapX, 10, 4, 12);
+            if (player.isInvincible && !player.isFalling) { ctx.fillStyle = '#0ff'; ctx.font = 'bold 22px sans-serif'; ctx.fillText('无敌!', SCREEN_W/2 - 50, 80); }
+            if (player.isFalling) { ctx.fillStyle = '#f44'; ctx.font = 'bold 24px sans-serif'; ctx.shadowColor = '#000'; ctx.shadowBlur = 8; ctx.fillText('💀 掉沟里了!', SCREEN_W/2 - 80, 120); ctx.shadowBlur = 0; }
+            if (levelComplete) { ctx.fillStyle = '#4f4'; ctx.font = 'bold 40px sans-serif'; ctx.textAlign = 'center'; ctx.shadowBlur = 16; ctx.fillText('🎉 关卡通过!', SCREEN_W/2, SCREEN_H/2 - 40); ctx.shadowBlur = 0; ctx.textAlign = 'left'; }
+            if (player.isDead && player.lives <= 0) { ctx.fillStyle = '#f44'; ctx.font = 'bold 48px sans-serif'; ctx.textAlign = 'center'; ctx.shadowBlur = 16; ctx.fillText('GAME OVER', SCREEN_W/2, SCREEN_H/2 - 20); ctx.font = 'bold 24px sans-serif'; ctx.fillText('按 R 键重新开始', SCREEN_W/2, SCREEN_H/2 + 40); ctx.shadowBlur = 0; ctx.textAlign = 'left'; }
+        }
+        if (gameWon && victoryCelebrating) {
+            const scale = 1 + Math.sin(victoryTimer * 2.5) * 0.06; const glow = 0.5 + 0.5 * Math.sin(victoryTimer * 2);
+            ctx.save(); ctx.translate(SCREEN_W/2, SCREEN_H/2 - 70); ctx.scale(scale, scale);
+            ctx.shadowColor = `rgba(255, 215, 0, ${glow * 0.8})`; ctx.shadowBlur = 60;
+            ctx.fillStyle = '#ffd700'; ctx.font = 'bold 58px "Segoe UI", system-ui'; ctx.textAlign = 'center'; ctx.fillText('🎉 通关! 🎉', 0, 0);
+            ctx.shadowBlur = 30; ctx.shadowColor = `rgba(255, 200, 100, ${glow * 0.5})`; ctx.fillStyle = '#fff8e0'; ctx.font = 'bold 32px "Segoe UI", system-ui'; ctx.fillText('🌟 拯救了蘑菇王国! 🌟', 0, 55);
+            ctx.shadowBlur = 0; ctx.restore();
+            ctx.fillStyle = 'rgba(255,255,200,0.7)'; ctx.font = '16px "Segoe UI", system-ui'; ctx.textAlign = 'center'; ctx.shadowColor = '#000'; ctx.shadowBlur = 8; ctx.fillText('按 R 键重新开始  |  按 N 键下一关', SCREEN_W/2, SCREEN_H - 30); ctx.shadowBlur = 0; ctx.textAlign = 'left';
+        }
+        requestAnimationFrame(gameLoop);
+    }
+
+    requestAnimationFrame(gameLoop);
+    canvas.addEventListener('click', () => { if (audio.ctx.state === 'suspended') audio.ctx.resume(); });
+    levelDisplay.textContent = '1';
+</script>
+</body>
+</html>
